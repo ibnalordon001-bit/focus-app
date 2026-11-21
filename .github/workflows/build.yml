@@ -1,15 +1,8 @@
-
-name: Build FocusLock APK from uploaded ZIP
+name: Build APK
 
 on:
   push:
-    paths:
-      - '*.zip'
-      - '.github/workflows/build.yml'
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   build:
@@ -22,40 +15,56 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          candidates=()
-          for file in ./*.zip; do
-            if unzip -Z1 "$file" | grep -qE '(^|/)settings\.gradle\.kts$'; then
-              candidates+=("$file")
+          rm -rf source && mkdir -p source
+
+          # ابحث عن أحدث ZIP في المستودع يحتوي مشروع أندرويد (settings.gradle.kts)
+          best=""; best_ts=-1
+          while IFS= read -r -d '' z; do
+            names=$(unzip -Z1 "$z" 2>/dev/null || true)
+            if grep -q 'settings\.gradle\.kts$' <<< "$names"; then
+              ts=$(git log -1 --format=%ct -- "$z" 2>/dev/null || echo 0)
+              ts=${ts:-0}
+              if [ "$ts" -gt "$best_ts" ]; then best="$z"; best_ts=$ts; fi
             fi
-          done
-          if [ "${#candidates[@]}" -eq 0 ]; then
-            echo "لم أجد ZIP يحتوي مشروع Android."
+          done < <(find . -path ./.git -prune -o -path ./source -prune -o -type f -iname '*.zip' -print0)
+
+          if [ -z "$best" ]; then
+            echo "::error::No ZIP containing settings.gradle.kts was found in the repository"
             exit 1
           fi
-          if [ "${#candidates[@]}" -gt 1 ]; then
-            printf 'وجدت أكثر من ZIP صالح: %s\n' "${candidates[@]}"
-            echo "اترك ملف ZIP الخاص بالمشروع المطلوب فقط."
-            exit 1
-          fi
-          mkdir -p "$GITHUB_WORKSPACE/source"
-          unzip -q "${candidates[0]}" -d "$GITHUB_WORKSPACE/source"
-          PROJECT_DIR="$(find "$GITHUB_WORKSPACE/source" -type f -name settings.gradle.kts -printf '%h\n' | head -n 1)"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Using ZIP: $best"
+
+          unzip -q -o "$best" -d source
+
+          # إصلاح الصلاحيات (الأرشيف المضغوط من الهاتف قد يحمل صلاحيات صفرية)
+          chmod -R u+rwX source
+
+          # أقرب settings.gradle.kts للجذر = مجلد المشروع
+          settings=$(find source -name settings.gradle.kts | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          proj=$(dirname "$settings")
+          echo "PROJECT_DIR=$proj" >> "$GITHUB_ENV"
+          echo "Project dir: $proj"
+
+          echo "--- assets ---"
+          ls -l "$proj/app/src/main/assets" || echo "::warning::assets folder not found"
+          [ -f "$proj/app/src/main/assets/focuslock_visual_model.tflite" ] || echo "::warning::focuslock_visual_model.tflite missing"
+          [ -f "$proj/app/src/main/assets/nudenet_320n_640_fp16.tflite" ] || echo "::warning::nudenet_320n_640_fp16.tflite missing (body detector disabled)"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: 17
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: 8.7
+          build-root-directory: ${{ env.PROJECT_DIR }}
 
       - name: Build Debug APK
-        run: gradle -p "$PROJECT_DIR" :app:assembleDebug --no-daemon
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
