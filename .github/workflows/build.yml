@@ -64,7 +64,26 @@ jobs:
 
       - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: |
+          set +e
+          gradle :app:assembleDebug --no-daemon --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" \
+            -Dkotlin.daemon.jvm.options="-Xmx2g" > build.log 2>&1
+          code=$?
+          echo "=== BUILD EXIT CODE: $code ==="
+          echo "=== ERRORS ==="
+          grep -n -E "What went wrong|FAILED|OutOfMemory|Execution failed|^e: |Caused by" -A6 build.log | head -100
+          echo "=== LAST 40 LINES ==="
+          tail -n 40 build.log
+          exit $code
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ env.PROJECT_DIR }}/build.log
+          if-no-files-found: ignore
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -72,4 +91,3 @@ jobs:
           name: FocusLock-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          
